@@ -1,14 +1,14 @@
 # Task 4: Deployment topologies and trade-offs
 
-**Name / ชื่อ:**
+**Name / ชื่อ:** นที จิระพงษา
 
-**Student ID / รหัสนิสิต:**
+**Student ID / รหัสนิสิต:** 6970144221
 
 This is **individual work**: each student completes and submits their own copy, in their own fork.
 
 *งานนี้เป็น**งานเดี่ยว** นิสิตแต่ละคนทำและส่งงานของตัวเอง ใน fork ของตัวเอง*
 
-**Scenario (A, B or C) / Scenario ที่เลือก:**
+**Scenario (A, B or C) / Scenario ที่เลือก:** B. Canteen kiosk
 
 Choose **one** scenario below. If the last digit of your student ID is odd, take A or B; if it is even, take B or C. Use your measurements from Tutorial 6 as evidence: cite run names from `results/runs.csv`. Answer in Thai or English.
 
@@ -58,9 +58,9 @@ The three most important quality requirements for your scenario, each with a num
 
 | # | Quality | Requirement |
 |---|---|---|
-| 1 | | |
-| 2 | | |
-| 3 | | |
+| 1 | Availability / durability | tablet รับรีวิวได้ 100% แม้ offline หลายนาที และไม่มีรีวิวหาย|
+| 2 | Timeliness | ทุกรีวิวมี label ก่อนสิ้นวันเช่น 23:59 ไม่ต้องเป็น real-time |
+| 3 | Accuracy | accuracy ≥ 93% (ระดับ t0-large) โดยเรียก large model ไม่เกิน 65% ของรีวิว |
 
 ## 2. Design / การออกแบบ
 
@@ -68,16 +68,34 @@ Your topology, the patterns you add, and a container-level diagram (C4 level 2).
 
 *topology ที่เลือก pattern ที่เพิ่ม และ diagram ระดับ container (C4 level 2) เขียนด้วย Mermaid*
 
+Topology ที่เลือกเป็น T4 Asynchronous / batch Patterns เป็น cascade (threshold 0.8) + cache + fallback (call ที่ timeout กลับเข้าคิวให้ retry)
+
+kiosk เก็บรีวิวไว้ใน outbox ในเครื่องก่อน แล้ว sync ขึ้น server เมื่อกลับมา online review service บันทึกรีวิวเป็น pending แล้วส่งเข้าคิว batch worker ดึงจากคิวมาติด label ด้วย cascade + cache ตามจังหวะที่ large model รับไหว
+
 ```mermaid
 C4Container
-    title Your design: container diagram
-    %% Replace the example below with your own people, containers and relationships.
-    %% See the CampusEats C4 diagram in README.md for the full syntax.
-    Person(customer, "Customer", "Writes restaurant reviews")
+    title Scenario B: canteen kiosk (async / batch)
+    Person(student, "Student", "เขียนรีวิวที่ kiosk ในโรงอาหาร")
+    Person(owner, "Restaurant owner", "ดู label ของร้านภายในสิ้นวัน")
     System_Boundary(campuseats, "CampusEats") {
-        Container(review, "Review service", "Python, FastAPI", "What it does")
+        Container(kiosk, "Kiosk app", "Tablet app, local SQLite outbox", "รับรีวิวแม้ offline และ sync เมื่อกลับมา online")
+        Container(gateway, "API gateway", "Python, FastAPI", "จุดเข้าเดียวของ client")
+        Container(review, "Review service", "Python, FastAPI", "บันทึกรีวิวสถานะ pending และ publish เข้าคิว")
+        ContainerDb(db, "Review DB", "PostgreSQL", "รีวิวและ label")
+        ContainerQueue(queue, "Message broker", "RabbitMQ", "คิวรีวิวที่รอ label")
+        Container(worker, "Labeling worker", "Python", "ดึงคิวเป็นชุด ใช้ cascade + cache และ retry เมื่อ timeout")
+        Container(inference, "Inference service", "Python, FastAPI, scikit-learn", "small model และ large model")
     }
-    Rel(customer, review, "Posts reviews", "HTTP/JSON")
+    Rel(student, kiosk, "เขียนรีวิว")
+    Rel(kiosk, gateway, "Sync รีวิวที่ค้างใน outbox", "HTTP/JSON")
+    Rel(gateway, review, "ส่งต่อ request", "HTTP/JSON")
+    Rel(review, db, "บันทึกรีวิว")
+    Rel(review, queue, "Publish review_id", "AMQP")
+    Rel(worker, queue, "Consume เป็นชุด", "AMQP")
+    Rel(worker, inference, "POST /predict (cascade)", "REST")
+    Rel(worker, db, "เขียน label")
+    Rel(owner, gateway, "ดู label", "HTTP/JSON")
+    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
 ```
 
 ## 3. Evidence / หลักฐาน
@@ -88,8 +106,10 @@ Which runs support your choice? Show the numbers and, for scenario A, the capaci
 
 | Run | What it shows / แสดงอะไร |
 |---|---|
-| | |
-| | |
+| t0-small vs t0-large | small model อย่างเดียวได้แค่ 72.5% เทียบกับ 93.5% จึงไม่ควรติด label บน kiosk ด้วย small model อย่างเดียว |
+| t2-0.8 | cascade 0.8 ได้ accuracy 93.5% เท่ากับ t0-large แต่เรียก large แค่ 64% ส่วน latency p95 ที่สูงไม่สำคัญเพราะเป็น batch |
+| t3-cache-0.8 | cache hit 35% ลด large calls ลงอีก (เหลือ 40% ที่ threshold 0.8 จาก 64% ใน t2-0.8) และ accuracy ยัง 93.5% จึงประหยัดค่าใช้จ่าย |
+| t1-after | timeout + pending ทำให้ errors เป็น 0 รีวิวที่ค้างไม่หายแต่รอติด label ทีหลัง ตรงกับแนวคิด queue + retry |
 
 ## 4. ADR
 
@@ -97,20 +117,23 @@ Use the ADR format from W5.
 
 *ใช้รูปแบบ ADR จาก W5*
 
-**Title:**
+**Title:** ใช้ asynchronous / batch labeling พร้อม offline outbox สำหรับ canteen kiosk
 
 **Status:** Proposed
 
-**Context:**
+**Context:** Wi-Fi ในโรงอาหารหลุดวันละหลายครั้ง ครั้งละหลายนาที แต่ต้องรับรีวิวทุกรายการ เจ้าของร้านต้องการ label แค่ภายในสิ้นวัน ส่วน large model รับได้สูงสุด 20 calls/s และมีค่าใช้จ่ายทุก call
 
-**Decision:**
+**Decision:** kiosk เก็บรีวิวไว้ใน local outbox แล้ว sync เมื่อ online รีวิวเข้าคิว (T4) และให้ worker ติด label เป็นชุดด้วย cascade (threshold 0.8) + cache ถ้า call ไหน timeout ให้ส่งกลับเข้าคิวเพื่อ retry
 
 **Consequences:**
-- Positive:
-- Negative:
+
+- Positive: ไม่มีรีวิวหายแม้ offline accuracy เท่ากับ large model (93.5%, t2-0.8) โดยเรียก large น้อยลง worker คุมอัตรา call ให้ไม่เกิน 20/s ได้
+- Negative: label ไม่ได้ทันที (eventual consistency) และต้องดูแลส่วนประกอบเพิ่ม (outbox, broker, worker) รวมถึงต้องกันรีวิวซ้ำเวลา sync ด้วย idempotency key
 
 **Alternatives considered:** at least one topology you rejected, and why.
 
 *อย่างน้อยหนึ่ง topology ที่ไม่เลือก และเหตุผล*
 
->
+> - **T1 synchronous:** ใช้ไม่ได้ตอน kiosk offline และไม่ต้องเร็วขนาดนั้นอยู่แล้ว
+> - **T2 small model บน kiosk อย่างเดียว:** ทำงาน offline ได้ แต่ accuracy แค่ 72.5% (t0-small)
+> - **T3 hybrid:** ได้ label ชั่วคราวทันที แต่ไม่มีใครต้องการ label ทันที จึงเพิ่มความซับซ้อนบน kiosk โดยไม่จำเป็น
